@@ -1,2 +1,5 @@
 data/
 node_modules/
+
+node_modules/
+payroll-seed.json.local

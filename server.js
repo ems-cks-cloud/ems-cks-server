@@ -12,18 +12,20 @@ const PH='';              // pengganti password pada data yang dikirim ke brows
 const SESSION_HOURS=12;
 const MITRA_ALLOWED=['dashboard','operasional','asisten','harikerja','legal'];
 const SECRET_KEYS=['ems_custom_users_v2','ems_user_passwords_v2','ems_user_names_v2'];
-const VERSION='1.4.4-online';
+const VERSION='1.4.5-online';
 
 const DEFAULTS={
- ktu:{pw:'KTU2026!',name:'Administrator KTU',role:'KTU Administrator',perms:['dashboard','anggaran','kasir','pembukuan','lahan','gis','operasional','asisten','harikerja','personalia','masterplan','laporan','admin','workflow','orgmaster','aset','legal','staffinti','serveradmin']},
- manager:{pw:'MGR2026!',name:'Manager Proyek',role:'Manager Administrator',perms:['dashboard','anggaran','kasir','pembukuan','lahan','gis','operasional','asisten','harikerja','personalia','masterplan','laporan','workflow','orgmaster','aset','legal','staffinti']},
+ ktu:{pw:'KTU2026!',name:'Administrator KTU',role:'KTU Administrator',perms:['dashboard','anggaran','kasir','pembukuan','lahan','gis','operasional','asisten','harikerja','personalia','payroll','masterplan','laporan','admin','workflow','orgmaster','aset','legal','staffinti','serveradmin']},
+ manager:{pw:'MGR2026!',name:'Manager Proyek',role:'Manager Administrator',perms:['dashboard','anggaran','kasir','pembukuan','lahan','gis','operasional','asisten','harikerja','personalia','payroll','masterplan','laporan','workflow','orgmaster','aset','legal','staffinti']},
  pembukuan:{pw:'ACC2026!',name:'Staf ACC / Accounting',role:'ACC / Accounting',perms:['anggaran','pembukuan','workflow','aset']},
  kerani:{pw:'KER2026!',name:'Kerani Divisi',role:'Kerani Divisi',perms:['operasional','harikerja']},
  gis:{pw:'GIS2026!',name:'Staf GIS',role:'GIS & Pengukuran',perms:['gis']},
  pl:{pw:'PL2026!',name:'Staf Pembebasan Lahan',role:'PL',perms:['lahan']},
  kasir:{pw:'KAS2026!',name:'Kasir',role:'Kasir',perms:['kasir','workflow']},
  asisten:{pw:'ASI2026!',name:'Asisten Divisi',role:'Asisten Divisi',perms:['asisten','harikerja']},
- personalia:{pw:'PAY2026!',name:'Staf Personalia & Payroll',role:'Personalia & Payroll',perms:['personalia','harikerja']},
+ personalia:{pw:'PAY2026!',name:'Staf Personalia',role:'Personalia',perms:['personalia']},
+ payroll:{name:'Staf Payroll',role:'Payroll',perms:['payroll']},
+ stok:{name:'Staf Gudang',role:'Gudang',perms:['aset']},
  infrastruktur:{pw:'INFRA2026!',name:'Staf Infrastruktur',role:'Infrastruktur',perms:['operasional','harikerja']}
 };
 
@@ -40,7 +42,7 @@ let db=readJSON(DBF,{rev:0,tenants:{}});
 let auth=readJSON(AUTHF,{users:{},sessions:{}});
 const hash=(pw,salt)=>crypto.scryptSync(String(pw),salt,32).toString('hex');
 function setPw(u,pw,extra={}){const salt=crypto.randomBytes(16).toString('hex');auth.users[u]=Object.assign(auth.users[u]||{tenant:'inti'},{salt,hash:hash(pw,salt),isDefault:false},extra);}
-function seedDefaults(){let seeded=false;Object.entries(DEFAULTS).forEach(([u,d])=>{if(!auth.users[u]){setPw(u,d.pw,{tenant:'inti',isDefault:true});seeded=true}});if(seeded)saveAuth(true)}
+function seedDefaults(){let seeded=false;Object.entries(DEFAULTS).forEach(([u,d])=>{if(!auth.users[u]){if(['payroll','stok'].includes(u)){const seed=readJSON(path.join(ROOT,'payroll-seed.json'),{})[u];if(seed){auth.users[u]={...seed,tenant:'inti',isDefault:true};seeded=true}}else{setPw(u,d.pw,{tenant:'inti',isDefault:true});seeded=true}}});if(seeded)saveAuth(true)}
 seedDefaults();
 function verify(u,pw){const a=auth.users[u];if(!a)return false;const h=Buffer.from(hash(pw,a.salt),'hex'),b=Buffer.from(a.hash,'hex');return h.length===b.length&&crypto.timingSafeEqual(h,b)}
 let saveT={},dirtyRev=0;
@@ -134,6 +136,41 @@ function session(req,url){
 const clients=new Set();
 function broadcast(tn,msg){const d='data: '+JSON.stringify(msg)+'\n\n';clients.forEach(c=>{if(c.tenant===tn)c.res.write(d)})}
 
+
+const EMP='ems_employees_v2',PAY='ems_payroll_periods_v2',WAGE='ems_wage_standards_v1';
+const employeeCategory=x=>String(x.statusKaryawan||'').replace(/[-_]/g,' ').replace(/\s+/g,' ').trim().toUpperCase();
+const parseRows=v=>{const x=JSON.parse(v||'[]');if(!Array.isArray(x))throw Error('Format daftar tidak valid.');return x};
+const same=(a,b)=>JSON.stringify(a)===JSON.stringify(b);
+function guardRoleWrite(s,key,value,previous){
+ const perms=profile(s.username)?.perms||[],ktu=s.username==='ktu',limited=['personalia','payroll','stok'].includes(s.username);
+ if(['payroll','stok'].includes(s.username)&&auth.users[s.username]?.isDefault&&!['ems_user_passwords_v2','simktu_activities_v2','ems_edit_history_v2'].includes(key))throw Error('Ganti password awal sebelum menggunakan akun.');
+ const common=['simktu_activities_v2','ems_edit_history_v2','ems_messages_v1','ems_messages_read_v1','ems_user_passwords_v2','ems_user_names_v2'];
+ if(limited&&!common.includes(key)&&!((s.username==='personalia'&&key===EMP)||(s.username==='payroll'&&key===PAY)||(s.username==='stok'&&key==='ems_asset_register_v2')))throw Error('Akses tulis ditolak untuk peran ini.');
+ if(key===WAGE&&!ktu)throw Error('Standar upah hanya dapat diubah KTU.');
+ if(key!==EMP&&key!==PAY)return;
+ if(!ktu&&!perms.includes(key===EMP?'personalia':'payroll'))throw Error('Akses modul ditolak.');
+ const rows=parseRows(value),old=parseRows(previous),map=new Map(old.map(x=>[String(x.id),x]));
+ if(new Set(rows.map(x=>String(x.id))).size!==rows.length)throw Error('ID duplikat.');
+ if(ktu)return;
+ if(old.some(x=>!rows.some(y=>String(x.id)===String(y.id))))throw Error('Penghapusan hanya dapat dilakukan KTU.');
+ for(const x of rows){const prev=map.get(String(x.id));if(same(x,prev))continue;
+  if(key===EMP){
+   if(s.username==='personalia'&&!['SKU H','SKU B'].includes(employeeCategory(x)))throw Error('Personalia hanya boleh menginput SKU H dan SKU B.');
+   const a={...x},b={...prev};delete a.payrollTransfer;delete b.payrollTransfer;
+   const transferOnly=prev&&same(a,b)&&prev.approval==='approved';
+   if(transferOnly){if(!['SKU H','SKU B','BHL'].includes(employeeCategory(x))||!x.payrollTransfer?.at)throw Error('Kategori transfer tidak valid.');continue}
+   if(x.approval!=='pending'||x.approvedBy||x.approvedAt)throw Error('Perubahan karyawan wajib menunggu persetujuan KTU.');
+   if(x.payrollTransfer)throw Error('Data yang diubah harus diajukan ulang sebelum transfer.');
+  }else{
+   if(prev&&prev.status!=='draft')throw Error('Periode terkunci sampai keputusan KTU.');
+   if(!['draft','menunggu_ktu'].includes(x.status)||x.approvedBy||x.approvedAt)throw Error('Finalisasi payroll hanya KTU.');
+   if(x.status==='menunggu_ktu'){if(!x.lines?.length)throw Error('Rincian payroll kosong.');const standards=parseRows(tenant(s.tenant).keys[WAGE]?.v);for(const l of x.lines){if(!standards.some(w=>w.category===employeeCategory(l)&&w.effective<=x.start&&Number(w.amount)>0))throw Error('Standar upah kategori belum diatur KTU untuk awal periode.')}}
+   const employees=parseRows(tenant(s.tenant).keys[EMP]?.v);
+   for(const line of x.lines||[]){if(prev?.lines?.some(l=>same(l,line)))continue;const e=employees.find(e=>String(e.nik)===String(line.nik));if(!e||e.approval!=='approved'||!e.payrollTransfer?.at)throw Error('Karyawan belum disetujui dan ditransfer ke Payroll.');if(line.statusKaryawan!==e.statusKaryawan)throw Error('Kategori payroll harus sesuai data transfer.');}
+  }
+ }
+}
+
 // ---------- tulis data ----------
 function isIdArray(a){return Array.isArray(a)&&a.every(x=>x&&typeof x==='object'&&!Array.isArray(x)&&(typeof x.id==='string'||typeof x.id==='number'))}
 function applyWrite(s,op){
@@ -142,7 +179,7 @@ function applyWrite(s,op){
  const admin=isAdmin(s);
  if(s.tenant!=='inti'&&SECRET_KEYS.includes(key))throw new Error('tidak diizinkan');
  let cur=T.keys[key];let value;
- if(op.op==='del'){delete T.keys[key];db.rev++;return {key,rev:0,remote:false}}
+ if(op.op==='del'){if([EMP,PAY].includes(key)&&s.username!=='ktu')throw Error('Penghapusan hanya dapat dilakukan KTU.');guardRoleWrite(s,key,'[]',cur?.v);delete T.keys[key];db.rev++;return {key,rev:0,remote:false}}
  if(op.op==='patch'){
   let arr=[];try{arr=JSON.parse(cur?.v||'[]')}catch(e){}
   if(!Array.isArray(arr))arr=[];
@@ -154,6 +191,7 @@ function applyWrite(s,op){
  }else{
   value=String(op.value);
  }
+ guardRoleWrite(s,key,value,cur?.v);
  if(SECRET_KEYS.includes(key))value=guardSecrets(s,key,value,admin);
  const prev=cur?cur.rev:0;
  T.keys[key]={v:value,rev:prev+1};db.rev++;
@@ -224,6 +262,7 @@ const server=http.createServer(async(req,res)=>{
  try{
   const url=new URL(req.url,'http://x');const p=url.pathname;
   if(p==='/'||p==='/index.html'){const f=path.join(ROOT,'public','index.html');res.writeHead(200,Object.assign({'Content-Type':'text/html; charset=utf-8','Cache-Control':'no-store'},SEC_HEADERS));fs.createReadStream(f).pipe(res);return}
+  if(p==='/role-split.js'){res.writeHead(200,Object.assign({'Content-Type':'application/javascript; charset=utf-8','Cache-Control':'no-store'},SEC_HEADERS));fs.createReadStream(path.join(ROOT,'public','role-split.js')).pipe(res);return}
   if(p==='/favicon.ico'){res.writeHead(204,SEC_HEADERS);res.end();return}
   if(!p.startsWith('/api/')){send(res,404,{error:'tidak ditemukan'});return}
   if(p==='/api/ping'){send(res,200,{ems:true,version:VERSION});return}
@@ -241,7 +280,7 @@ const server=http.createServer(async(req,res)=>{
   s.profile=profile(s.username);if(!s.profile){send(res,401,{error:'akun tidak dikenal'});return}
   auth.sessions[s.token].t=Date.now();
   if(p==='/api/snapshot'){
-   const out={};for(const [k,v] of Object.entries(tenant(s.tenant).keys)){if(SECRET_KEYS.includes(k)&&k==='ems_user_passwords_v2')continue;out[k]=v}
+   const out={};for(const [k,v] of Object.entries(tenant(s.tenant).keys)){if(SECRET_KEYS.includes(k)&&k==='ems_user_passwords_v2')continue;if(s.username==='personalia'&&k===PAY)continue;if(s.username==='stok'&&[EMP,PAY,WAGE].includes(k))continue;out[k]=v}
    const pr=s.profile;if(pr.tenant!=='inti')pr.perms=pr.perms.filter(x=>MITRA_ALLOWED.includes(x));
    send(res,200,{keys:out,user:Object.assign(pr,{mustChange:!!auth.users[s.username].isDefault})});return;
   }
