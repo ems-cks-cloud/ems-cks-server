@@ -12,7 +12,7 @@ const PH='';              // pengganti password pada data yang dikirim ke brows
 const SESSION_HOURS=12;
 const MITRA_ALLOWED=['dashboard','operasional','asisten','harikerja','legal'];
 const SECRET_KEYS=['ems_custom_users_v2','ems_user_passwords_v2','ems_user_names_v2'];
-const VERSION='1.4.2-online';
+const VERSION='1.4.3-online';
 
 const DEFAULTS={
  ktu:{pw:'KTU2026!',name:'Administrator KTU',role:'KTU Administrator',perms:['dashboard','anggaran','kasir','pembukuan','lahan','gis','operasional','asisten','harikerja','personalia','masterplan','laporan','admin','workflow','orgmaster','aset','legal','staffinti','serveradmin']},
@@ -23,7 +23,8 @@ const DEFAULTS={
  pl:{pw:'PL2026!',name:'Staf Pembebasan Lahan',role:'PL',perms:['lahan']},
  kasir:{pw:'KAS2026!',name:'Kasir',role:'Kasir',perms:['kasir','workflow']},
  asisten:{pw:'ASI2026!',name:'Asisten Divisi',role:'Asisten Divisi',perms:['asisten','harikerja']},
- personalia:{pw:'PAY2026!',name:'Staf Personalia & Payroll',role:'Personalia & Payroll',perms:['personalia','harikerja']}
+ personalia:{pw:'PAY2026!',name:'Staf Personalia & Payroll',role:'Personalia & Payroll',perms:['personalia','harikerja']},
+ infrastruktur:{pw:'INFRA2026!',name:'Staf Infrastruktur',role:'Infrastruktur',perms:['operasional','harikerja']}
 };
 
 // ---------- persistensi GitHub: konfigurasi (fungsi detail di bawah) ----------
