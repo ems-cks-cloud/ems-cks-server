@@ -1,0 +1,8 @@
+{
+  "name": "ems-cks-server",
+  "version": "1.4.1",
+  "description": "Server online EMS PT Citra Kenyalang Sakti (multi-user, realtime SSE, backup otomatis, sinkron GitHub)",
+  "main": "server.js",
+  "scripts": { "start": "node server.js" },
+  "engines": { "node": ">=18" }
+}
