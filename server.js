@@ -12,7 +12,7 @@ const PH='';              // pengganti password pada data yang dikirim ke brows
 const SESSION_HOURS=12;
 const MITRA_ALLOWED=['dashboard','operasional','asisten','harikerja','legal'];
 const SECRET_KEYS=['ems_custom_users_v2','ems_user_passwords_v2','ems_user_names_v2'];
-const VERSION='1.4.1-online';
+const VERSION='1.4.2-online';
 
 const DEFAULTS={
  ktu:{pw:'KTU2026!',name:'Administrator KTU',role:'KTU Administrator',perms:['dashboard','anggaran','kasir','pembukuan','lahan','gis','operasional','asisten','harikerja','personalia','masterplan','laporan','admin','workflow','orgmaster','aset','legal','staffinti','serveradmin']},
