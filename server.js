@@ -12,7 +12,7 @@ const PH='';              // pengganti password pada data yang dikirim ke brows
 const SESSION_HOURS=12;
 const MITRA_ALLOWED=['dashboard','operasional','asisten','harikerja','legal'];
 const SECRET_KEYS=['ems_custom_users_v2','ems_user_passwords_v2','ems_user_names_v2'];
-const VERSION='1.4.3-online';
+const VERSION='1.4.4-online';
 
 const DEFAULTS={
  ktu:{pw:'KTU2026!',name:'Administrator KTU',role:'KTU Administrator',perms:['dashboard','anggaran','kasir','pembukuan','lahan','gis','operasional','asisten','harikerja','personalia','masterplan','laporan','admin','workflow','orgmaster','aset','legal','staffinti','serveradmin']},
@@ -30,8 +30,8 @@ const DEFAULTS={
 // ---------- persistensi GitHub: konfigurasi (fungsi detail di bawah) ----------
 const GH_TOKEN=process.env.EMS_GH_TOKEN||'',GH_REPO=process.env.EMS_GH_REPO||'',GH_BRANCH=process.env.EMS_GH_BRANCH||'main';
 const ghOn=!!(GH_TOKEN&&GH_REPO);
-let ghStateDirty=false,ghTimer=null,ghQueue=Promise.resolve(),ghLastPushAt=0;
-function ghDirty(){if(ghOn){ghStateDirty=true;clearTimeout(ghTimer);ghTimer=setTimeout(()=>ghPushState(),15000)}}
+let ghStateDirty=false,ghTimer=null,ghQueue=Promise.resolve(),ghLastPushAt=0,ghLastError=null,ghPushing=false,ghReady=!ghOn;
+function ghDirty(){if(ghOn){ghStateDirty=true;if(!ghReady)return;clearTimeout(ghTimer);ghTimer=setTimeout(()=>ghPushState(),15000)}}
 
 // ---------- penyimpanan ----------
 const DBF=path.join(DATA,'db.json'),AUTHF=path.join(DATA,'auth.json');
@@ -51,7 +51,7 @@ function tenant(t){return db.tenants[t]||(db.tenants[t]={keys:{}})}
 
 // ---------- persistensi GitHub: implementasi (konfigurasi ada di atas) ----------
 async function ghApi(method,p,body){
- const r=await fetch('https://api.github.com/repos/'+GH_REPO+p,{method,headers:{Authorization:'Bearer '+GH_TOKEN,Accept:'application/vnd.github+json','User-Agent':'ems-cks-server','X-GitHub-Api-Version':'2022-11-28'},body:body?JSON.stringify(body):undefined});
+ const r=await fetch('https://api.github.com/repos/'+GH_REPO+p,{method,signal:AbortSignal.timeout(15000),headers:{Authorization:'Bearer '+GH_TOKEN,Accept:'application/vnd.github+json','User-Agent':'ems-cks-server','X-GitHub-Api-Version':'2022-11-28'},body:body?JSON.stringify(body):undefined});
  if(r.status===404)return null;
  if(!r.ok){const t=await r.text().catch(()=> '');throw new Error('GitHub '+method+' '+p+' -> '+r.status+' '+t.slice(0,200))}
  return r.json();
@@ -60,7 +60,7 @@ async function ghRef(){const o=await ghApi('GET','/git/ref/heads/'+encodeURIComp
 // files: [{path, buf}] atau [{path, del:true}]; satu commit untuk semua.
 function ghCommit(files,msg){
  if(!ghOn)return Promise.resolve();
- ghQueue=ghQueue.then(async()=>{
+ const job=ghQueue.then(async()=>{
   for(let attempt=0;attempt<2;attempt++){
    try{
     const base=await ghRef();
@@ -73,18 +73,23 @@ function ghCommit(files,msg){
     const tr=await ghApi('POST','/git/trees',{base_tree:base,tree});
     const cm=await ghApi('POST','/git/commits',{message:msg,tree:tr.sha,parents:[base]});
     await ghApi('PATCH','/git/refs/heads/'+encodeURIComponent(GH_BRANCH),{sha:cm.sha});
-    ghLastPushAt=Date.now();return;
+    ghLastPushAt=Date.now();ghLastError=null;return;
    }catch(e){if(attempt===1)throw e;await new Promise(r=>setTimeout(r,1500))}
   }
- }).catch(e=>console.error('GitHub push gagal:',e.message));
- return ghQueue;
+ });
+ ghQueue=job.catch(e=>{ghLastError=e.message;console.error('GitHub push gagal:',e.message)});
+ return job;
 }
 async function ghBlobText(sha){const o=await ghApi('GET','/git/blobs/'+sha);return o?Buffer.from(o.content,'base64'):null}
 async function ghPushState(){
- if(!ghOn||!ghStateDirty)return;ghStateDirty=false;
- try{saveDB(true);saveAuth(true);
+ if(!ghOn||!ghReady||!ghStateDirty||ghPushing)return;
+ ghPushing=true;ghStateDirty=false;clearTimeout(ghTimer);
+ try{
+  // Flush without marking the same state dirty again.
+  atomic(DBF,db);atomic(AUTHF,auth);
   await ghCommit([{path:'state/db.json',buf:fs.readFileSync(DBF)},{path:'state/auth.json',buf:fs.readFileSync(AUTHF)}],'data: sinkron otomatis '+new Date().toISOString());
- }catch(e){console.error('GitHub push state gagal:',e.message)}
+ }catch(e){ghStateDirty=true;ghLastError=e.message;console.error('GitHub push state gagal:',e.message)}
+ finally{ghPushing=false;if(ghStateDirty){clearTimeout(ghTimer);ghTimer=setTimeout(()=>ghPushState(),ghLastError?60000:15000)}}
 }
 async function ghPull(){
  if(!ghOn)return;
@@ -92,15 +97,19 @@ async function ghPull(){
   const base=await ghRef();
   const tr=await ghApi('GET','/git/trees/'+base+'?recursive=1');
   const paths=new Map((tr.tree||[]).filter(x=>x.type==='blob').map(x=>[x.path,x.sha]));
-  if(paths.has('state/db.json')){const b=await ghBlobText(paths.get('state/db.json'));if(b){fs.writeFileSync(DBF,b);db=readJSON(DBF,{rev:0,tenants:{}})}}
-  if(paths.has('state/auth.json')){const b=await ghBlobText(paths.get('state/auth.json'));if(b){fs.writeFileSync(AUTHF,b);auth=readJSON(AUTHF,{users:{},sessions:{}});auth.sessions={};seedDefaults()}}
+  if(!paths.has('state/db.json')||!paths.has('state/auth.json'))throw new Error('Snapshot utama GitHub tidak lengkap; perlu pemulihan sebelum membuka server.');
+  const dbBuf=await ghBlobText(paths.get('state/db.json')),authBuf=await ghBlobText(paths.get('state/auth.json'));
+  if(!dbBuf||!authBuf)throw new Error('Snapshot GitHub tidak terbaca.');
+  const nextDB=JSON.parse(dbBuf.toString()),nextAuth=JSON.parse(authBuf.toString());
+  if(!Number.isInteger(nextDB.rev)||!nextDB.tenants||typeof nextDB.tenants!=='object'||Array.isArray(nextDB.tenants)||!nextAuth.users||typeof nextAuth.users!=='object'||Array.isArray(nextAuth.users))throw new Error('Snapshot GitHub tidak valid.');
+  db=nextDB;auth=nextAuth;auth.sessions={};atomic(DBF,db);atomic(AUTHF,auth);seedDefaults();
   let nf=0;
   for(const [p,sha] of paths){if(!p.startsWith('files/'))continue;const local=path.join(FILES,p.slice(6));if(fs.existsSync(local))continue;const b=await ghBlobText(sha);if(!b)continue;fs.mkdirSync(path.dirname(local),{recursive:true});fs.writeFileSync(local,b);nf++}
   console.log('GitHub: data dipulihkan (rev '+db.rev+', lampiran baru '+nf+').');
- }catch(e){console.error('GitHub pull gagal (server tetap jalan dengan data lokal):',e.message)}
+ }catch(e){ghLastError=e.message;console.error('GitHub pull gagal; server tidak dibuka untuk mencegah penimpaan data:',e.message);throw e}
 }
-function ghFilePushT(tn,id){if(!ghOn)return;try{const base=path.join(fdir(tn),id);const rel=tn.replace(/[^a-z0-9-]/g,'_')+'/'+id;const files=[{path:'files/'+rel+'.json',buf:fs.readFileSync(base+'.json')}];if(fs.existsSync(base+'.bin'))files.push({path:'files/'+rel+'.bin',buf:fs.readFileSync(base+'.bin')});ghCommit(files,'lampiran: '+rel)}catch(e){console.error('GitHub push lampiran gagal:',e.message)}}
-function ghFileDel(tn,id){if(!ghOn)return;const rel=tn.replace(/[^a-z0-9-]/g,'_')+'/'+id;ghCommit([{path:'files/'+rel+'.json',del:true},{path:'files/'+rel+'.bin',del:true}],'hapus lampiran: '+rel)}
+function ghFilePushT(tn,id){if(!ghOn)return;try{const base=path.join(fdir(tn),id);const rel=tn.replace(/[^a-z0-9-]/g,'_')+'/'+id;const files=[{path:'files/'+rel+'.json',buf:fs.readFileSync(base+'.json')}];if(fs.existsSync(base+'.bin'))files.push({path:'files/'+rel+'.bin',buf:fs.readFileSync(base+'.bin')});ghCommit(files,'lampiran: '+rel).catch(()=>{})}catch(e){console.error('GitHub push lampiran gagal:',e.message)}}
+function ghFileDel(tn,id){if(!ghOn)return;const rel=tn.replace(/[^a-z0-9-]/g,'_')+'/'+id;ghCommit([{path:'files/'+rel+'.json',del:true},{path:'files/'+rel+'.bin',del:true}],'hapus lampiran: '+rel).catch(()=>{})}
 setInterval(()=>{if(ghStateDirty)ghPushState()},5*60*1000);
 
 // ---------- profil & sesi ----------
@@ -189,7 +198,7 @@ function makeBackup(tag){
  const name=(tag||'backup')+'-'+stamp()+'.json';
  const buf=Buffer.from(JSON.stringify({app:'EMS-CKS-SERVER',createdAt:new Date().toISOString(),db,auth:{users:auth.users}}));
  fs.writeFileSync(path.join(BK,name),buf);
- if(ghOn){const dd=String(new Date().getDate()).padStart(2,'0');ghCommit([{path:'backups/latest.json',buf},{path:'backups/daily-'+dd+'.json',buf}],'backup: '+name)}
+ if(ghOn){const dd=String(new Date().getDate()).padStart(2,'0');ghCommit([{path:'backups/latest.json',buf},{path:'backups/daily-'+dd+'.json',buf}],'backup: '+name).catch(()=>{})}
  lastBackupRev=db.rev;lastBackupAt=new Date().toISOString();prune();return name;
 }
 function listBackups(){return fs.readdirSync(BK).filter(f=>f.endsWith('.json')).map(f=>{const st=fs.statSync(path.join(BK,f));return{name:f,size:st.size,time:st.mtime.toISOString()}}).sort((a,b)=>b.time.localeCompare(a.time))}
@@ -265,7 +274,7 @@ const server=http.createServer(async(req,res)=>{
   if(p.startsWith('/api/admin/')){
    if(!isAdmin(s)){send(res,403,{error:'Hanya KTU/admin server.'});return}
    if(p==='/api/admin/status'){
-    send(res,200,{rev:db.rev,online:[...clients].map(c=>c.user),backups:listBackups().slice(0,60),lastBackupAt,dataDir:DATA,addresses:ips().map(i=>'http://'+i+':'+PORT),port:PORT,version:VERSION,ghSync:ghOn?{repo:GH_REPO,lastPushAt:ghLastPushAt?new Date(ghLastPushAt).toISOString():null}:false,
+    send(res,200,{rev:db.rev,online:[...clients].map(c=>c.user),backups:listBackups().slice(0,60),lastBackupAt,dataDir:DATA,addresses:ips().map(i=>'http://'+i+':'+PORT),port:PORT,version:VERSION,ghSync:ghOn?{repo:GH_REPO,pending:ghStateDirty||ghPushing,lastError:ghLastError,lastPushAt:ghLastPushAt?new Date(ghLastPushAt).toISOString():null}:false,
      users:Object.entries(auth.users).map(([u,a])=>({username:u,tenant:a.tenant,isDefault:!!a.isDefault,name:profile(u)?.name||'(tanpa profil)'})),
      tenants:Object.keys(db.tenants)});return}
    if(p==='/api/admin/backup'&&req.method==='POST'){send(res,200,{name:makeBackup('manual')});return}
@@ -292,7 +301,7 @@ function restoreFile(file){
 }
 
 (async()=>{
- await ghPull();
+ await ghPull();ghReady=true;if(ghStateDirty)ghDirty();
  if(db.rev>0)makeBackup('start');
  setTimeout(()=>{if(db.rev!==lastBackupRev&&db.rev>0)makeBackup('otomatis')},2*60*1000);
  server.listen(PORT,'0.0.0.0',()=>{
@@ -302,6 +311,6 @@ function restoreFile(file){
   console.log('Folder data & backup  : '+DATA);
   console.log('Sinkron GitHub        : '+(ghOn?GH_REPO+' (aktif)':'nonaktif'));
  });
-})();
-const bye=async()=>{try{clearTimeout(ghTimer);saveDB(true);saveAuth(true);if(ghOn&&ghStateDirty){ghStateDirty=false;await Promise.race([ghCommit([{path:'state/db.json',buf:fs.readFileSync(DBF)},{path:'state/auth.json',buf:fs.readFileSync(AUTHF)}],'data: sinkron saat berhenti '+new Date().toISOString()),new Promise(r=>setTimeout(r,9000))])}}catch(e){}process.exit(0)};
+})().catch(e=>{clearTimeout(ghTimer);console.error('Startup dihentikan: backup GitHub belum dapat diverifikasi.');process.exit(1)});
+const bye=async()=>{if(!ghReady){process.exit(0);return}try{clearTimeout(ghTimer);saveDB(true);saveAuth(true);if(ghOn&&ghStateDirty){ghStateDirty=false;await Promise.race([ghCommit([{path:'state/db.json',buf:fs.readFileSync(DBF)},{path:'state/auth.json',buf:fs.readFileSync(AUTHF)}],'data: sinkron saat berhenti '+new Date().toISOString()),new Promise(r=>setTimeout(r,9000))])}}catch(e){}process.exit(0)};
 process.on('SIGINT',()=>{bye()});process.on('SIGTERM',()=>{bye()});
