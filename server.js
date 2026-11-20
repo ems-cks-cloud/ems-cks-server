@@ -12,7 +12,7 @@ const PH='';              // pengganti password pada data yang dikirim ke brows
 const SESSION_HOURS=12;
 const MITRA_ALLOWED=['dashboard','operasional','asisten','harikerja','legal'];
 const SECRET_KEYS=['ems_custom_users_v2','ems_user_passwords_v2','ems_user_names_v2'];
-const VERSION='1.4.5-online';
+const VERSION='1.4.6-online';
 
 const DEFAULTS={
  ktu:{pw:'KTU2026!',name:'Administrator KTU',role:'KTU Administrator',perms:['dashboard','anggaran','kasir','pembukuan','lahan','gis','operasional','asisten','harikerja','personalia','payroll','masterplan','laporan','admin','workflow','orgmaster','aset','legal','staffinti','serveradmin']},
@@ -308,6 +308,22 @@ const server=http.createServer(async(req,res)=>{
    if(m[2]){send(res,200,fs.readFileSync(base+'.json','utf8'));return}
    if(req.method==='DELETE'){fs.unlinkSync(base+'.json');try{fs.unlinkSync(base+'.bin')}catch(e){}ghFileDel(s.tenant,id);send(res,200,{ok:true});return}
    const meta=JSON.parse(fs.readFileSync(base+'.json','utf8'));res.writeHead(200,Object.assign({'Content-Type':meta.blobType||meta.mime||'application/octet-stream','Cache-Control':'no-store'},SEC_HEADERS));fs.createReadStream(base+'.bin').pipe(res);return;
+  }
+  // reset password oleh KTU/Manager: server membuat password sementara acak,
+  // ditampilkan sekali ke yang mereset; akun wajib menggantinya saat login berikutnya.
+  if(p==='/api/admin/reset-password'&&req.method==='POST'){
+   const perms=s.profile?.perms||[];
+   if(!(s.tenant==='inti'&&(s.username==='ktu'||s.username==='manager'||perms.includes('serveradmin')))){send(res,403,{error:'Hanya KTU atau Manager yang dapat mereset password.'});return}
+   const o=JSON.parse((await body(req,1e5)).toString()||'{}');
+   const target=String(o.username||'').trim().toLowerCase();
+   if(!auth.users[target]){send(res,404,{error:'Akun tidak ditemukan.'});return}
+   const ABC='abcdefghjkmnpqrstuvwxyzABCDEFGHJKMNPQRSTUVWXYZ23456789';
+   let temp='';
+   while(temp.length<12||!/[a-z]/.test(temp)||!/[A-Z]/.test(temp)||!/[0-9]/.test(temp))temp=Array.from(crypto.randomBytes(12)).map(b=>ABC[b%ABC.length]).join('');
+   setPw(target,temp,{isDefault:true});
+   for(const[t,ses]of Object.entries(auth.sessions))if(ses.username===target)delete auth.sessions[t];
+   saveAuth(true);
+   send(res,200,{ok:true,username:target,tempPassword:temp,mustChange:true});return;
   }
   // admin
   if(p.startsWith('/api/admin/')){
